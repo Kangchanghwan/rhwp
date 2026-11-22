@@ -274,7 +274,7 @@ jobs:
           {
             echo "### cs-deploy"
             echo "- WASM 경로: ${{ steps.wasm.outputs.cache-hit == 'true' && 'cache hit (Rust 빌드 건너뜀)' || 'cache miss (소스에서 빌드)' }}"
-            echo "- cargo 캐시 적중: ${{ steps.cargo.outputs.cache-hit || 'n/a' }}"
+            echo "- cargo 캐시 적중: ${{ steps.cargo.outputs.cache-hit == 'true' && 'hit' || (steps.wasm.outputs.cache-hit == 'true' && 'skipped' || 'miss') }}"
             echo "- Rust 빌드 초: ${RUST_BUILD_SEC:-0}"
             echo "- 사이트 조립 초: ${SITE_BUILD_SEC:-0}"
             echo "- 전체 초(여기까지): ${total}"

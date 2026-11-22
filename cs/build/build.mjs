@@ -89,6 +89,8 @@ async function buildStudio() {
   // wasm-pack-locked.sh 가 public/ 에 복사해 둔 사본은 사이트에 실리면 안 된다 (조각으로만 싣는다)
   rmSync(join(work, 'rhwp-studio', 'public', 'rhwp_bg.wasm'), { force: true })
   try { execFileSync('git', ['checkout', '--', 'rhwp-studio/public/rhwp.js'], { cwd: repo, stdio: 'inherit' }) } catch { log('경고: public/rhwp.js 를 원래대로 되돌리지 못했습니다') }
+  // npm 패키지(@rhwp/core)와 같은 보완: package.json, README, notices/ (upstream scripts/prepare-npm.sh)
+  if (!existsSync(join(pkg, 'notices'))) run('bash', ['scripts/prepare-npm.sh'], { cwd: repo })
   // engine license and third-party notices for out/licenses/
   mkdirSync(join(cacheRoot, 'core-notices'), { recursive: true })
   if (existsSync(join(pkg, 'notices'))) cpSync(join(pkg, 'notices'), join(cacheRoot, 'core-notices', 'notices'), { recursive: true })
