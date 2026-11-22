@@ -1,0 +1,23 @@
+{
+  "base": "/",
+  "wasmParts": 2,
+  "npmCore": {
+    "version": "0.9.1",
+    "wasmSha256": "e2e56dfd387ffee5b0995d23e4a0086001407f12a045820eb61bd6a506c9abc1",
+    "integrity": "sha512-jMLOubFHp5MocnbyYNoPwcUDAIqzF47hBv420i0prnN4+hk0iX/f4RPv0NotDOtQcANaFjJe8/mo64aQsZ73XA=="
+  },
+  "editorVersion": "0.9.1",
+  "excludedFonts": {
+    "Cafe24Ssurround-v2.0.woff2": "Pretendard-Bold.woff2",
+    "Cafe24Supermagic-Regular-v1.0.woff2": "Pretendard-Regular.woff2",
+    "Happiness-Sans-Regular.woff2": "Pretendard-Regular.woff2",
+    "Happiness-Sans-Bold.woff2": "Pretendard-Bold.woff2",
+    "Happiness-Sans-Title.woff2": "Pretendard-ExtraBold.woff2",
+    "HappinessSansVF.woff2": "Pretendard-Regular.woff2"
+  },
+  "excludedLicenseFiles": [
+    "Cafe24Ssurround-LICENSE.pdf",
+    "Cafe24Supermagic-LICENSE.pdf",
+    "HappinessSans-LICENSE.pdf"
+  ]
+}

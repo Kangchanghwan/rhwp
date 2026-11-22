@@ -1,0 +1,27 @@
+hwp-editor
+https://github.com/Kangchanghwan/hwp-editor
+
+이 저장소는 rhwp-studio 를 빌드해 hwp.clipboardapp.org 에 배포하는 스크립트와 설정만 담고 있다.
+배포되는 편집기 코드와 엔진은 아래 upstream 프로젝트의 것이다.
+
+rhwp / rhwp-studio / @rhwp/core / @rhwp/editor
+  Copyright (c) 2025-2026 Edward Kim
+  MIT License
+  https://github.com/edwardkim/rhwp
+  고정 버전: 태그 v0.9.1 (커밋 981ce66b4183b13c1a3b5907e04a8969c8c42034), @rhwp/core 0.9.1
+
+엔진(@rhwp/core)에 포함된 서드파티 구성 요소의 라이선스와 고지는 배포물의
+licenses/rhwp-core/notices/ 에 upstream 이 제공한 그대로 들어 있다.
+
+글꼴
+  배포물 fonts/ 의 글꼴은 upstream assets/fonts/ 에서 가져왔다. 각 글꼴의 저작권 고지와
+  라이선스 전문(SIL OFL 1.1, GUST Font License 등)은 fonts/licenses/ 에 함께 배포한다.
+  카페24 써라운드, 카페24 슈퍼매직, 해피니스 산스는 라이선스가 PDF 로만 제공되어 재배포 조건을
+  확인하기 전까지 배포물에서 뺐다. 목록은 fonts/licenses/EXCLUDED.txt 에 있다.
+
+이 저장소에서 바꾼 점
+  - 사이트 루트(/)에서 서비스하도록 빌드
+  - PWA service worker 와 web manifest 제거, 샘플 문서 제거
+  - 엔진 wasm 을 두 조각으로 나눠 싣고 wasm-bindgen 로더가 이어 붙여 읽도록 수정
+    (Cloudflare Pages 파일 하나당 25 MiB 제한)
+  - 위 세 글꼴을 가리키던 글꼴 규칙을 Pretendard 로 바꿈

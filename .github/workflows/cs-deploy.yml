@@ -1,0 +1,289 @@
+name: cs-deploy
+
+# 이 포크의 Rust 소스로 엔진 WASM 을 빌드하고, rhwp-studio 와 합쳐 hwp.clipboardapp.org 용 사이트를 만든 뒤
+# 게이트를 통과하면 Cloudflare Pages(hwp-editor 프로젝트)에 올린다.
+#   cs/main 브랜치      -> --branch main (운영)
+#   그 밖의 cs/* 브랜치 -> --branch <브랜치 이름의 / 를 - 로 바꾼 것> (미리보기만)
+# 설명: cs/README.md
+
+on:
+  push:
+    branches: ['cs/**']
+  workflow_dispatch:
+    inputs:
+      full_verify:
+        description: '원본 verify-release-wasm (render diff, 네이티브 skia 빌드 포함, 오래 걸림) 도 실행'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cs-deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/cs/main' }}
+
+env:
+  # Rust 입력이 같아도 빌드 방식을 바꾸면 이 숫자를 올려 캐시를 버린다
+  WASM_CACHE_VERSION: v1
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build-gate-deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Start clock
+        run: echo "CS_T0=$(date +%s)" >> "$GITHUB_ENV"
+
+      # 무거운 폴더는 받지 않는다. Cargo 가 읽는 매니페스트 대상(tests/*.rs 등)과 workspace 멤버의 Cargo.toml·src 는 남긴다.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/mydocs/*
+            /mydocs/manual/
+            /mydocs/tech/agent_roadmap/
+            !/pdf/
+            !/samples/
+            !/tests/*
+            /tests/*.rs
+            /tests/generated/
+            /tests/cases/
+            !/tools/llm_verifier/*/
+            /tools/llm_verifier/verdict_protocol/
+            /tools/llm_verifier/claim_bind/
+            /tools/llm_verifier/criteria_decomp/
+            !/tools/llm_verifier/*/fixtures/
+            !/tools/llm_verifier/*/scripts/
+
+      - name: Checkout size
+        run: |
+          echo "작업 트리(.git 제외): $(du -sm --exclude=.git . | cut -f1) MB, 파일 $(git ls-files | wc -l) 개 (스파스 적용 후 실제 존재 $(find . -path ./.git -prune -o -type f -print | wc -l) 개)"
+          echo ".git: $(du -sm .git | cut -f1) MB"
+          echo "CHECKOUT_MB=$(du -sm --exclude=.git . | cut -f1)" >> "$GITHUB_ENV"
+          du -sm --exclude=.git * .github 2>/dev/null | sort -rn | head -8
+
+      - name: Compute WASM cache key
+        id: key
+        run: echo "wasm=wasm-pkg-${WASM_CACHE_VERSION}-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain.toml', '.cargo/**', 'src/**', 'crates/**', 'vendor/**', 'assets/fonts/**', 'assets/font-rules/**', 'data/**', 'saved/**', 'scripts/wasm-pack-locked.sh', 'scripts/measure_render_diff_wasm.py', 'scripts/verify_release_wasm.py', '.github/actions/install-wasm-pack/action.yml') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore WASM package cache
+        id: wasm
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            pkg
+            output/render-diff-build
+          key: ${{ steps.key.outputs.wasm }}
+
+      # ---------------------------------------------------------------- Rust (캐시가 없을 때만)
+      - name: Install Rust toolchain
+        if: steps.wasm.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        if: steps.wasm.outputs.cache-hit != 'true'
+        uses: ./.github/actions/install-wasm-pack
+
+      - name: Cache cargo registry and target
+        if: steps.wasm.outputs.cache-hit != 'true'
+        id: cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cs-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cs-cargo-${{ runner.os }}-
+
+      - name: Build WASM from source
+        if: steps.wasm.outputs.cache-hit != 'true'
+        env:
+          RHWP_CARGO_CACHE_HIT: ${{ steps.cargo.outputs.cache-hit }}
+          RHWP_CARGO_CACHE_MATCHED_KEY: ${{ steps.cargo.outputs.cache-matched-key }}
+        run: |
+          t=$(date +%s)
+          python3 scripts/measure_render_diff_wasm.py --profile release --build-mode standard
+          echo "RUST_BUILD_SEC=$(( $(date +%s) - t ))" >> "$GITHUB_ENV"
+
+      - name: Verify release WASM identity (source, profile, wasm-opt, artifact hashes)
+        if: steps.wasm.outputs.cache-hit != 'true'
+        run: >-
+          python3 scripts/verify_release_wasm.py
+          --manifest output/render-diff-build/build.json
+          --package-dir pkg --package-dir rhwp-studio/public
+
+      - name: Full upstream verification (render diff; manual runs only)
+        if: steps.wasm.outputs.cache-hit != 'true' && github.event_name == 'workflow_dispatch' && inputs.full_verify
+        uses: ./.github/actions/verify-release-wasm
+
+      # 가공(조각 나누기) 전에 저장한다. build.mjs 는 pkg/ 를 고친다.
+      - name: Save WASM package cache
+        if: steps.wasm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            pkg
+            output/render-diff-build
+          key: ${{ steps.key.outputs.wasm }}
+
+      - name: Check cached WASM against its build manifest
+        if: steps.wasm.outputs.cache-hit == 'true'
+        run: |
+          echo "WASM 캐시 적중: Rust 빌드를 건너뜁니다 (key ${{ steps.key.outputs.wasm }})"
+          python3 - <<'PY'
+          import hashlib, json
+          m = json.load(open('output/render-diff-build/build.json'))
+          assert m['success'] is True and m['profile'] == 'release'
+          for name in ('rhwp.js', 'rhwp_bg.wasm'):
+              data = open('pkg/' + name, 'rb').read()
+              a = m['artifacts'][name]
+              assert a['sha256'] == hashlib.sha256(data).hexdigest() and a['bytes'] == len(data), name
+          print('cached pkg matches build.json; built from', m['source_sha'], m['rustc'], m['wasm_pack'])
+          PY
+
+      # ---------------------------------------------------------------- 사이트 조립
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            cs/package-lock.json
+            rhwp-studio/package-lock.json
+
+      - name: Install cs dev dependencies
+        working-directory: cs
+        run: npm ci --no-audit --no-fund
+
+      - name: Unit tests (cs/agent)
+        working-directory: cs
+        run: npm test
+
+      - name: Build site (studio + engine + post-processing)
+        env:
+          CS_BUILD: ${{ github.sha }}
+        run: |
+          t=$(date +%s)
+          node cs/build/build.mjs
+          echo "SITE_BUILD_SEC=$(( $(date +%s) - t ))" >> "$GITHUB_ENV"
+
+      - name: Check Cloudflare Pages limits (< 20,000 files, <= 25 MiB each)
+        run: node cs/build/check-limits.mjs cs/out
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('cs/package-lock.json') }}
+
+      - name: Install Chromium
+        working-directory: cs
+        run: npx playwright install --with-deps chromium
+
+      - name: Gate
+        working-directory: cs
+        run: node gate/run.mjs
+
+      - name: Gate (agent tools, headless e2e)
+        working-directory: cs
+        run: node gate/agent-tools.e2e.mjs --dist out
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            cs/gate/report.json
+            cs/gate/agent-tools.report.json
+            cs/.cache/build-report.json
+            cs/.cache/meta.json
+            cs/out/build-identity.json
+            output/render-diff-build/build.json
+          if-no-files-found: ignore
+
+      - name: Upload site
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: cs/out/
+          include-hidden-files: true
+          retention-days: 7
+
+      # ---------------------------------------------------------------- 배포
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN 또는 CLOUDFLARE_ACCOUNT_ID 시크릿이 없습니다."
+            exit 1
+          fi
+          test -f cs/out/_headers
+          if [ "${GITHUB_REF}" = "refs/heads/cs/main" ]; then
+            pages_branch=main
+            kind=production
+          else
+            pages_branch="${GITHUB_REF_NAME//\//-}"
+            kind=preview
+          fi
+          echo "배포 종류: ${kind}, Pages 브랜치: ${pages_branch}"
+          echo "pages_branch=${pages_branch}" >> "$GITHUB_OUTPUT"
+          echo "kind=${kind}" >> "$GITHUB_OUTPUT"
+          npx --yes wrangler@4.166.0 pages deploy cs/out \
+            --project-name hwp-editor \
+            --branch "${pages_branch}" \
+            --commit-hash "${GITHUB_SHA}" \
+            --commit-message "cs-deploy ${GITHUB_SHA}" 2>&1 | tee "${RUNNER_TEMP}/wrangler.log"
+          url=$(grep -Eo 'https://[A-Za-z0-9.-]+\.pages\.dev' "${RUNNER_TEMP}/wrangler.log" | tail -n 1 || true)
+          echo "deployment_url=${url}" >> "$GITHUB_OUTPUT"
+          echo "DEPLOY_URL=${url}" >> "$GITHUB_ENV"
+          echo "DEPLOY_KIND=${kind}" >> "$GITHUB_ENV"
+
+      - name: Verify deployed build-identity
+        run: |
+          want=$(node -p "require('./cs/out/build-identity.json').csBuild")
+          url="${DEPLOY_URL}"
+          if [ "$DEPLOY_KIND" = preview ]; then
+            alias="https://${{ steps.deploy.outputs.pages_branch }}.hwp-editor-aai.pages.dev"
+            echo "branch alias: ${alias}"
+          else
+            alias="$url"
+          fi
+          for u in "$url" "$alias"; do
+            ok=0
+            for i in 1 2 3 4 5 6; do
+              got=$(curl -fsS "${u}/build-identity.json" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).csBuild" 2>/dev/null || true)
+              if [ "$got" = "$want" ]; then ok=1; break; fi
+              sleep 10
+            done
+            echo "${u}: csBuild ${got:-<none>} (want ${want}) -> $([ $ok = 1 ] && echo OK || echo MISMATCH)"
+            [ $ok = 1 ] || exit 1
+          done
+
+      - name: Timings summary
+        if: always()
+        run: |
+          total=$(( $(date +%s) - CS_T0 ))
+          {
+            echo "### cs-deploy"
+            echo "- WASM 경로: ${{ steps.wasm.outputs.cache-hit == 'true' && 'cache hit (Rust 빌드 건너뜀)' || 'cache miss (소스에서 빌드)' }}"
+            echo "- cargo 캐시 적중: ${{ steps.cargo.outputs.cache-hit == 'true' && 'hit' || (steps.wasm.outputs.cache-hit == 'true' && 'skipped' || 'miss') }}"
+            echo "- Rust 빌드 초: ${RUST_BUILD_SEC:-0}"
+            echo "- 사이트 조립 초: ${SITE_BUILD_SEC:-0}"
+            echo "- 전체 초(여기까지): ${total}"
+            echo "- 체크아웃 MB: ${CHECKOUT_MB:-?}"
+            echo "- 배포: ${DEPLOY_KIND:-none} ${DEPLOY_URL:-}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "TIMINGS rust=${RUST_BUILD_SEC:-0} site=${SITE_BUILD_SEC:-0} total=${total} cachehit=${{ steps.wasm.outputs.cache-hit }}"

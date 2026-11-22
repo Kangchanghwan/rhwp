@@ -1,0 +1,21 @@
+{
+  "name": "cs-hwp-editor",
+  "private": true,
+  "type": "module",
+  "description": "Kangchanghwan/rhwp \ud3ec\ud06c\uc758 \ud3b8\uc9d1\uae30 \ube4c\ub4dc\u00b7\uac8c\uc774\ud2b8\u00b7\uc5d0\uc774\uc804\ud2b8 \uac1c\ubc1c \ub3c4\uad6c (cs/ \uc804\uc6a9)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build/build.mjs",
+    "gate": "node gate/run.mjs",
+    "check-limits": "node build/check-limits.mjs out",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@rhwp/editor": "0.9.1",
+    "playwright": "1.65.1",
+    "vitest": "^4.0.9"
+  }
+}
