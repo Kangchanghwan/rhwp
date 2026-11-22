@@ -123,6 +123,7 @@ import { DocumentAgentController } from '@/document-agent/controller';
 import { initI18n, t } from '@/i18n/index.ts';
 import { SidePanelController, createDomSidePanelView } from '@/view/side-panel-host';
 import { navigateToSearchHit } from '@/ui/find-dialog';
+import { installCsAgentToolsGlobal } from '../../cs/studio/agent-tools-global'; // [cs]
 
 // 언어팩 초기화 — 정적 마크업의 라벨을 결정된 로케일로 갱신한다. 카탈로그에 없는 키는
 // 원문(ko)으로 물러나므로 번역이 없는 상태에서도 화면은 도입 전과 같다.
@@ -345,6 +346,7 @@ async function resolvePlugin(id: string): Promise<StudioPlugin> {
   if (__RHWP_AI__ && id === 'ai-assistant') {
     return (await import('@/ai/plugin')).aiAssistantPlugin;
   }
+  if (id === 'cs-agent-tools') return (await import('../../cs/studio/agent-tools-plugin')).csAgentToolsPlugin; // [cs] AI 패널 빌드 여부와 무관
   if (import.meta.env.DEV && id === 'dev-probe') {
     return (await import('@/plugin/dev-probe-plugin')).devProbePlugin;
   }
@@ -368,7 +370,7 @@ const plugins = new PluginHostRegistry({
   automation,
   eventBus,
   getInputHandler: () => inputHandler,
-  loadDocument: (bytes, fileName) => loadBytes(bytes, fileName ?? 'document.hwp', null),
+  loadDocument: (bytes, fileName) => loadBytes(bytes, fileName ?? 'document.hwp', null, undefined, { suppressDialogs: true }), // [cs] 로컬 글꼴 모달이 플러그인 로드를 막지 않게
   createBlankDocument: async (options) => {
     if (options?.confirmUnsaved && !await canReplaceCurrentDocument()) return false;
     await createNewDocument();
@@ -395,6 +397,7 @@ const plugins = new PluginHostRegistry({
   },
 });
 (window as any).rhwpStudio.plugins = plugins;
+installCsAgentToolsGlobal(plugins, (window as any).rhwpStudio); // [cs]
 
 // 모든 내장 커맨드 등록. embed 프로파일에서는 문서 수명주기 커맨드를 등록하지 않는다 —
 // registerAll이 메뉴 클릭·단축키·전역 단축키·커맨드 팔레트가 모두 지나는 choke point라
