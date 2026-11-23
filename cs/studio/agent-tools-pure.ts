@@ -467,6 +467,136 @@ export function validatePlanShape(steps: unknown): { ok: true; steps: Array<{ to
   return { ok: true, steps: (steps as Array<{ tool: string; args?: Record<string, unknown> }>).map((s) => ({ tool: s.tool, args: s.args ?? {} })) };
 }
 
+// ───────────────────────── 공백 관용 찾기 ─────────────────────────
+
+/** 폭이 없는 공백류(질의에서는 있어도 없어도 되고, 문서에서는 공백 구실을 한다) */
+const ZERO_WIDTH = '\\u200B\\uFEFF';
+/** 공백류 전체: \s + U+00A0, U+2000–U+200B, U+202F, U+205F, U+3000, U+FEFF */
+const WS_CLASS = `\\s\\u00A0\\u2000-\\u200B\\u202F\\u205F\\u3000\\uFEFF`;
+const WS_RE = new RegExp(`[${WS_CLASS}]`);
+const ZW_RE = new RegExp(`[${ZERO_WIDTH}]`);
+
+export const isWhitespaceChar = (ch: string): boolean => WS_RE.test(ch);
+
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * 질의 → 정규식. 질의의 공백 덩어리 하나 = 문서의 공백 1개 이상. 폭 없는 문자만 있는 덩어리는 0개 이상.
+ * 그 밖의 글자는 그대로(대소문자·문장부호 변환 없음).
+ */
+export function buildWhitespacePattern(query: string): RegExp {
+  let out = '';
+  const chars = [...query];
+  for (let i = 0; i < chars.length;) {
+    if (WS_RE.test(chars[i])) {
+      let j = i; let strict = false;
+      while (j < chars.length && WS_RE.test(chars[j])) { if (!ZW_RE.test(chars[j])) strict = true; j += 1; }
+      out += strict ? `[${WS_CLASS}]+` : `[${ZERO_WIDTH}]*`;
+      i = j;
+    } else { out += escapeRe(chars[i]); i += 1; }
+  }
+  return new RegExp(out, 'g');
+}
+
+/** 공백이 아닌 가장 긴 덩어리 — 엔진의 정확 검색으로 후보 문단을 좁히는 데 쓴다. */
+export function longestToken(query: string): string {
+  let best = '';
+  for (const part of query.split(new RegExp(`[${WS_CLASS}]+`))) if (part.length > best.length) best = part;
+  return best;
+}
+
+/** 한 문단 글 안에서 공백 관용으로 맞는 부분들(겹치지 않게, 앞에서부터). 정확 문자열을 돌려준다. */
+export function normalizedMatchesIn(text: string, query: string): Array<{ index: number; text: string }> {
+  if (longestToken(query).length === 0) return [];
+  const re = buildWhitespacePattern(query);
+  const out: Array<{ index: number; text: string }> = [];
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m[0].length === 0) { re.lastIndex += 1; continue; }
+    out.push({ index: m.index, text: m[0] });
+  }
+  return out;
+}
+
+export interface SearchHit { sec: number; para: number; charOffset: number; length: number; cellContext?: { parentPara: number; ctrlIdx: number; cellIdx: number; cellPara: number } }
+export interface SearchDoc {
+  searchAllText(query: string, caseSensitive: boolean, includeCells: boolean): string;
+  getParagraphLength(section: number, paragraph: number): number;
+  getTextRange(section: number, paragraph: number, offset: number, count: number): string;
+  getCellParagraphLength(section: number, parentPara: number, controlIndex: number, cellIndex: number, cellPara: number): number;
+  getTextInCell(section: number, parentPara: number, controlIndex: number, cellIndex: number, cellPara: number, offset: number, count: number): string;
+}
+
+const hitKey = (h: SearchHit): string => (h.cellContext
+  ? `c:${h.sec}:${h.cellContext.parentPara}:${h.cellContext.ctrlIdx}:${h.cellContext.cellIdx}:${h.cellContext.cellPara}`
+  : `b:${h.sec}:${h.para}`);
+
+function paragraphOf(doc: SearchDoc, h: SearchHit): string {
+  if (h.cellContext) {
+    const c = h.cellContext;
+    const len = doc.getCellParagraphLength(h.sec, c.parentPara, c.ctrlIdx, c.cellIdx, c.cellPara);
+    return len > 0 ? doc.getTextInCell(h.sec, c.parentPara, c.ctrlIdx, c.cellIdx, c.cellPara, 0, len) : '';
+  }
+  const len = doc.getParagraphLength(h.sec, h.para);
+  return len > 0 ? doc.getTextRange(h.sec, h.para, 0, len) : '';
+}
+
+export interface NormalizedMatch { text: string; key: string; rank: number; paragraph: string; index: number }
+
+/** 문서 전체에서 공백 관용 일치를 읽는 순서대로 모은다(표 칸 포함, 한 문단 안에서만). */
+export function findNormalized(doc: SearchDoc, query: string): NormalizedMatch[] {
+  const token = longestToken(query);
+  if (!token) return [];
+  const hits = JSON.parse(doc.searchAllText(token, true, true)) as SearchHit[];
+  const seen = new Set<string>();
+  const out: NormalizedMatch[] = [];
+  for (const h of hits) {
+    const key = hitKey(h);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const para = paragraphOf(doc, h);
+    const counts = new Map<string, number>();
+    for (const m of normalizedMatchesIn(para, query)) {
+      const rank = counts.get(m.text) ?? 0; // 이 문단 안에서 같은 글이 몇 번째로 나오는가
+      counts.set(m.text, rank + 1);
+      out.push({ text: m.text, key, rank, paragraph: para, index: m.index });
+    }
+  }
+  return out;
+}
+
+export type Resolved =
+  | { kind: 'exact' }
+  | { kind: 'none' }
+  | { kind: 'error'; code: string; message: string }
+  | { kind: 'normalized'; find: string; occurrence?: number; matchedText: string };
+
+/**
+ * 찾을 글을 정확히 먼저, 없을 때만 공백 관용으로 문서의 정확한 글로 바꾼다.
+ * 모호함(여러 곳, occurrence 없음)은 정규화 일치 수로 센다. 돌려준 find/occurrence 를 upstream 도구에 그대로 넘긴다.
+ */
+export function resolveLocator(doc: SearchDoc, query: string, occurrence: number | undefined, toolHasOccurrence: boolean): Resolved {
+  const exact = JSON.parse(doc.searchAllText(query, true, true)) as SearchHit[];
+  if (exact.length > 0) return { kind: 'exact' };
+  const matches = findNormalized(doc, query);
+  if (matches.length === 0) return { kind: 'none' };
+  if (occurrence === undefined && matches.length > 1) {
+    return { kind: 'error', code: 'AMBIGUOUS_TARGET', message: `"${query}" matches ${matches.length} places when whitespace is ignored. Use a longer find text${toolHasOccurrence ? ` or pass occurrence (1-${matches.length})` : ''}.` };
+  }
+  const n = occurrence ?? 1;
+  if (n > matches.length) return { kind: 'error', code: 'REFUSED', message: `occurrence must be between 1 and ${matches.length}.` };
+  const chosen = matches[n - 1];
+  const E = chosen.text;
+  const eHits = JSON.parse(doc.searchAllText(E, true, true)) as SearchHit[];
+  const sameKey = eHits.filter((h) => hitKey(h) === chosen.key);
+  const target = sameKey[chosen.rank] ?? sameKey[0];
+  const k = Math.max(0, eHits.indexOf(target));
+  if (eHits.length > 1 && !toolHasOccurrence) {
+    return { kind: 'error', code: 'AMBIGUOUS_TARGET', message: `"${E}" occurs ${eHits.length} times and this tool cannot pick one; use a longer find text.` };
+  }
+  const needOcc = toolHasOccurrence && (occurrence !== undefined || eHits.length > 1);
+  return { kind: 'normalized', find: E, ...(needOcc ? { occurrence: k + 1 } : {}), matchedText: E };
+}
+
 // ───────────────────────── help() ─────────────────────────
 
 export interface HelpTool { name: string; group: string; description: string; inputSchema: Record<string, unknown>; headless?: boolean }
@@ -511,6 +641,7 @@ function buildHelpWith(tools: readonly HelpTool[], maxLine: number): string {
     '1. `await hwpAgent.callTool("get_document_info")`  2. 읽기: get_outline / read_paragraphs / list_tables / read_table / list_fields',
     '3. 계획: 바꿀 곳을 모두 정한다  4. `callTool("run_plan",{steps:[{tool,args}]})` 로 한 번에 적용 (all-or-nothing, undo 1번)',
     '규칙: 읽기 먼저, 편집은 그 다음. find 는 읽은 글을 **글자 그대로 복사**(공백·대소문자 포함). 한 곳만 맞아야 하고 여럿이면 occurrence(1부터).',
+    '공백: find 가 안 맞으면 공백 종류·개수를 무시해 한 번 더 찾고(결과에 normalizedMatch:true, matchedText), 그래도 여럿이면 AMBIGUOUS_TARGET.',
     '표 좌표: table/row/col 모두 0부터. 쪽 번호만 1부터. 병합으로 덮인 칸은 anchor(왼쪽 위 칸)에 쓴다.',
     '',
     '## 호출 (API)',

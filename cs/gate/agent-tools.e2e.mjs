@@ -500,12 +500,118 @@ async function runSample(rel) {
   return steps;
 }
 
+// ───────────── 추가 시나리오: 공백 관용 찾기(10), 「AI에게 맡기기」 버튼(11) ─────────────
+async function runExtras() {
+  const rel = 'samples/156636617_240617 2024년 5월 월간 수출입 현황(확정치).hwp';
+  const steps = {};
+  const rec = (name, pass, detail) => { steps[name] = { pass: !!pass, ...detail }; report[pass ? 'passed' : 'failed']++; console.log(`${pass ? 'PASS' : 'FAIL'} [extras] ${name}`, JSON.stringify(detail ?? {}).slice(0, 400)); };
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(url).origin });
+  const page = await ctx.newPage();
+  const errors = []; page.on('pageerror', (e) => errors.push(String(e)));
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForFunction(() => window.hwpAgent && document.getElementById('menu-bar'), null, { timeout: 30000 });
+  const b64 = loadSample(rel).toString('base64');
+  const load = async () => {
+    let r = null;
+    for (let i = 0; i < 20; i++) {
+      r = await within(page.evaluate(async (b) => { const bin = atob(b); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return await window.hwpAgent.loadDocument(u, 'ws.hwp'); }, b64), 90000, 'load');
+      if (r.ok) break; await page.waitForTimeout(500);
+    }
+    await page.waitForTimeout(300); return r;
+  };
+  const hc = (tool, a, o) => within(page.evaluate(({ tool, a, o }) => window.hwpAgent.callTool(tool, a, o), { tool, a, o }), 120000, `callTool ${tool}`);
+  const EXACT = '(단위\u2007: 백만 달러, %)';
+  const NORMAL = '(단위 : 백만 달러, %)';
+  const para = async (r) => { // 결과 위치의 문단을 다시 읽는다
+    const loc = r.result.location; const rp = await hc('read_paragraphs', { section: loc.section, from: loc.paragraph, count: 1 }); return rp.result.paragraphs[0].text;
+  };
+
+  // 10) 공백 관용 찾기
+  {
+    const l = await load();
+    const exactHits = (await hc('search_text', { query: EXACT })).result;
+    const normHits = (await hc('search_text', { query: NORMAL })).result;
+    const N = exactHits.totalHits;
+    const occ = N > 1 ? { occurrence: 1 } : {};
+    const hintOk = normHits.totalHits === 0 && normHits.normalizedMatches?.[0]?.matchedText === EXACT;
+    const amb = N > 1 ? await hc('replace_text', { find: NORMAL, replace: 'x' }) : null;
+    const ambOk = N > 1 ? (amb.ok === false && amb.error.code === 'AMBIGUOUS_TARGET') : true;
+    const dry = await hc('replace_text', { find: NORMAL, replace: 'WS교체(단위)', ...occ }, { dryRun: true });
+    const dryOk = dry.ok && dry.result.dryRun === true && dry.result.normalizedMatch === true && dry.result.matchedText === EXACT && dry.result.oldText === EXACT;
+    const real = await hc('replace_text', { find: NORMAL, replace: 'WS교체(단위)', ...occ });
+    const after = real.ok ? await para(real) : '';
+    const realOk = real.ok && real.result.normalizedMatch === true && real.result.matchedText === EXACT && real.result.verified === true && after.includes('WS교체(단위)') && !after.includes(EXACT);
+    const stale = await hc('replace_text', { find: '이 문장은 문서에 절대 없다 9f3a', replace: 'x' });
+    const staleOk = stale.ok === false && stale.error.code === 'TARGET_NOT_FOUND';
+    // 정확히 맞는 경우는 normalizedMatch 가 없다
+    await load();
+    const ex = await hc('replace_text', { find: EXACT, replace: 'EXACT교체', ...occ });
+    const exOk = ex.ok && !('normalizedMatch' in ex.result) && !('matchedText' in ex.result) && (await para(ex)).includes('EXACT교체');
+    rec('10a_whitespace_replace', l.ok && N >= 1 && hintOk && ambOk && dryOk && realOk && staleOk && exOk, { exactHits: N, hintOk, ambOk, dryOk, realOk, staleOk, exOk, after: after.slice(0, 80), real: JSON.stringify(real).slice(0, 220) });
+
+    // run_plan 안의 단계도 같은 규칙(사전 검증 + 적용 + 재읽기)
+    await load();
+    const step = { tool: 'replace_text', args: { find: NORMAL, replace: 'PLAN교체(단위)', ...occ } };
+    const pd = await hc('run_plan', { steps: [step], dryRun: true });
+    const pa = await hc('run_plan', { steps: [step] });
+    const hit = (await hc('search_text', { query: 'PLAN교체(단위)' })).result.totalHits;
+    const planOk = pd.ok && pd.result.valid === true && pd.result.steps[0].preview.normalizedMatch === true && pa.ok && pa.result.applied === true
+      && pa.result.steps[0].normalizedMatch === true && pa.result.steps[0].matchedText === EXACT && pa.result.verified === true && hit === 1;
+    // 다른 도구의 인자(insert_field 의 after)에도 적용되는지
+    await load();
+    const fld = await hc('insert_field', { after: NORMAL, name: 'WS_F', guide: 'g', ...occ });
+    const fldOk = fld.ok && fld.result.normalizedMatch === true && (await hc('list_fields', {})).result.fields.some((f) => f.name === 'WS_F');
+    rec('10b_whitespace_run_plan_and_other_args', planOk && fldOk, { planOk, fldOk, fld: JSON.stringify(fld).slice(0, 260) });
+  }
+
+  // 11) 「AI에게 맡기기」 버튼
+  {
+    const info = await page.evaluate(() => {
+      const b = document.getElementById('cs-ai-handoff'); const bar = document.getElementById('menu-bar');
+      const r = b?.getBoundingClientRect(); const br = bar.getBoundingClientRect();
+      const rect = (id) => { const e = document.getElementById(id); const x = e.getBoundingClientRect(); return [x.x, x.y, x.width, x.height].map(Math.round).join(','); };
+      return { exists: !!b, visible: !!b && b.offsetWidth > 0 && b.offsetHeight > 0, text: b?.textContent, inBar: bar.contains(b), within: !!r && r.right <= br.right + 0.5 && r.bottom <= br.bottom + 0.5, before: [rect('scroll-container'), rect('editor-area'), rect('icon-toolbar'), rect('status-bar')], prompt: window.hwpAgent.agentPrompt, style: getComputedStyle(b).fontFamily === getComputedStyle(document.querySelector('.menu-title')).fontFamily };
+    });
+    await page.click('#cs-ai-handoff');
+    await page.waitForSelector('#cs-ai-handoff .cs-toast', { timeout: 3000 });
+    const toast = await page.textContent('#cs-ai-handoff .cs-toast');
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    await page.waitForFunction(() => !document.querySelector('#cs-ai-handoff .cs-toast'), null, { timeout: 5000 });
+    // 버튼을 걷어도 문서 영역 위치가 같다(= 레이아웃을 밀지 않는다)
+    const noShift = await page.evaluate((before) => {
+      document.getElementById('cs-ai-handoff').remove();
+      const rect = (id) => { const e = document.getElementById(id); const x = e.getBoundingClientRect(); return [x.x, x.y, x.width, x.height].map(Math.round).join(','); };
+      return JSON.stringify(before) === JSON.stringify(['scroll-container', 'editor-area', 'icon-toolbar', 'status-bar'].map(rect));
+    }, info.before);
+    rec('11a_handoff_button', info.exists && info.visible && info.inBar && info.within && info.style && info.text.includes('AI에게 맡기기') && clip === info.prompt && /^이 탭\(편집기\)의 문서는/.test(info.prompt) && /복사했어요/.test(toast) && noShift,
+      { info: { ...info, prompt: undefined }, clipOk: clip === info.prompt, toast, noShift });
+    // 클립보드 API 가 없을 때 execCommand 대체 경로 + 좁은 화면
+    const ctx2 = await browser.newContext({ viewport: { width: 400, height: 800 } });
+    await ctx2.addInitScript(() => { Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }); window.__copied = null; document.addEventListener('copy', () => { window.__copied = document.getSelection().toString(); }); });
+    const p2 = await ctx2.newPage(); const errs2 = []; p2.on('pageerror', (e) => errs2.push(String(e)));
+    await p2.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await p2.waitForSelector('#cs-ai-handoff', { timeout: 30000 });
+    const narrow = await p2.evaluate(() => { const b = document.getElementById('cs-ai-handoff'); return { w: b.offsetWidth, label: [...b.children].filter((c) => getComputedStyle(c).display !== 'none').map((c) => c.textContent).join(''), overflowX: document.documentElement.scrollWidth > window.innerWidth }; });
+    await p2.click('#cs-ai-handoff');
+    await p2.waitForSelector('#cs-ai-handoff .cs-toast', { timeout: 3000 });
+    const fb = await p2.evaluate(() => ({ toast: document.querySelector('#cs-ai-handoff .cs-toast').textContent, copied: window.__copied, prompt: window.hwpAgent.agentPrompt }));
+    await ctx2.close();
+    rec('11b_handoff_fallback_narrow', narrow.w > 0 && narrow.label === 'AI' && !narrow.overflowX && /복사/.test(fb.toast) && fb.copied === fb.prompt && errs2.length === 0, { narrow, fb: { toast: fb.toast, copiedOk: fb.copied === fb.prompt }, errs2 });
+  }
+
+  rec('12_extras_no_page_errors', errors.length === 0, { errors: errors.slice(0, 3) });
+  await ctx.close();
+  report.samples.extras = steps;
+}
+
 try {
   for (const rel of samples) {
     try { report.samples[rel] = await runSample(rel); }
     catch (e) { report.failed++; report.samples[rel] = { exception: { pass: false, message: String(e).slice(0, 500) } }; console.log('EXC', rel, e); }
   }
 } finally {
+  try { await runExtras(); } catch (e) { report.failed++; report.samples.extras = { exception: { pass: false, message: String(e).slice(0, 500) } }; console.log('EXC extras', e); }
   await browser.close(); server.close();
 }
 report.finishedAt = new Date().toISOString();

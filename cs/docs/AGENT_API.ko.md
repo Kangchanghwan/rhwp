@@ -66,6 +66,22 @@ await hwpAgent.exportDocument('hwpx'); await hwpAgent.loadDocument(bytes, 'a.hwp
 `replace_text`, `set_cell_text`, `set_cells`, `fill_fields`(와 `run_plan` 의 요약) 결과에 `verified: true|false` 가 붙는다. 쓴 뒤 문서를 **다시 읽어** 확인한 값이다.
 `replace_text` 는 앞뒤 문맥을 포함한 새 글이 더 많이 검색되는지(또는 비운 글이 줄었는지), `set_cell_text`/`set_cells` 는 그 칸을 다시 읽어 글이 같은지, `fill_fields` 는 누름틀 목록을 다시 읽어 값이 같은지 본다.
 
+## 공백 관용 찾기
+
+문서의 글에는 보통 공백처럼 보여도 다른 문자(예: 숫자 공백 U+2007 「단위\u2007: 백만 달러」)가 들어 있다. 에이전트가 일반 공백으로 쓰면 못 찾던 문제를 플러그인 층에서 푼다.
+`find` 와 `after` 인자를 가진 모든 도구(쓰기 도구, `select_text`, `run_plan` 의 사전 검증과 실행, `dryRun`)에 같은 규칙이 적용된다.
+
+1. 먼저 **정확히** 찾는다. 있으면 그대로 쓴다(`normalizedMatch` 없음).
+2. 정확히 하나도 없을 때만, 질의의 공백 덩어리 하나가 문서의 공백 1개 이상과 맞는 것으로 다시 찾는다. 공백은 `\s` + U+00A0, U+2000–U+200B, U+202F, U+205F, U+3000, U+FEFF. 폭 없는 문자(U+200B, U+FEFF)만 있는 덩어리는 있어도 없어도 된다. 대소문자·문장부호는 바꾸지 않는다. 공백 없는 질의는 서로 다른 낱말을 건너 맞추지 않는다. 한 문단 안에서만 맞춘다.
+3. 맞은 곳의 **문서 글 그대로**를 upstream 도구에 넘기므로 `occurrence`, 모호함, 한 문단 규칙은 그대로다. 정규화로 맞은 곳이 여럿인데 `occurrence` 가 없으면 `AMBIGUOUS_TARGET`. `occurrence` 는 정규화로 맞은 곳의 순번이다.
+4. 쓴 경우 결과에 `normalizedMatch: true`, `matchedText`(문서의 정확한 글)가 붙는다. `run_plan` 이면 단계 결과와 `dryRun` 미리보기에 붙는다.
+5. `search_text` 는 정확 일치 결과를 그대로 돌려주되, 0건이고 공백만 다른 글이 있으면 `normalizedMatches:[{matchedText,count}]` 힌트를 붙인다.
+
+## 「AI에게 맡기기」 버튼
+
+메뉴 바 오른쪽(기본 도구 상자 접기 버튼 바로 앞, `#menu-bar > #cs-ai-handoff`)의 작은 버튼. 누르면 `hwpAgent.agentPrompt`(안내문)를 클립보드에 복사하고 버튼 아래에 「복사했어요」(`.cs-toast`, `role="status"`)를 잠깐 보인다.
+`navigator.clipboard` 가 없거나 거절되면 숨은 textarea + `execCommand('copy')` 로 대신한다. 폭 480px 미만에서는 라벨이 「AI」로 줄어든다. 메뉴 바 높이·문서 영역 위치를 바꾸지 않는다(게이트가 확인). 플러그인은 올리지 않는다(`cs/studio/agent-tools-global.ts`).
+
 ## undo 한 번이 되돌리는 것
 
 | 호출 | undo 스텝 |
@@ -80,7 +96,7 @@ await hwpAgent.exportDocument('hwpx'); await hwpAgent.loadDocument(bytes, 'a.hwp
 
 `cd cs && npm ci && npm test` (순수 로직 단위 테스트: `studio/agent-tools-pure.test.ts`) 와 `node cs/gate/agent-tools.e2e.mjs`(헤드리스 Chromium).
 게이트는 같은 문서(`samples/3-09월_교육_통합_2022.hwpx` 와 `.hwp`, 표 2개·병합 있음)로 다음을 독립 재읽기로 확인한다:
-9a 표 목록/읽기 일치 + `set_cells` → 재읽기 → 내보내기 → 다시 열어 유지, 9b 병합에 덮인 칸 `COVERED_BY_MERGE` 와 문서 불변(서명 + 바이트), 9c `fill_fields`(있는 이름/없는 이름/중복 이름/순번/undo), 9d `run_plan`(잘못된 단계 1개 → 변경 0, 올바른 3단계 → 적용 → undo 1번에 원복, 실행 중 실패 → 롤백), 9e dryRun 불변, 9f `help()`·`listTools`·`hwpAgent`·meta, 9g 지연 로드와 WebMCP.
+9a 표 목록/읽기 일치 + `set_cells` → 재읽기 → 내보내기 → 다시 열어 유지, 9b 병합에 덮인 칸 `COVERED_BY_MERGE` 와 문서 불변(서명 + 바이트), 9c `fill_fields`(있는 이름/없는 이름/중복 이름/순번/undo), 9d `run_plan`(잘못된 단계 1개 → 변경 0, 올바른 3단계 → 적용 → undo 1번에 원복, 실행 중 실패 → 롤백), 9e dryRun 불변, 9f `help()`·`listTools`·`hwpAgent`·meta, 9g 지연 로드와 WebMCP, 10 공백 관용 찾기(`samples/156636617_240617 2024년 5월 월간 수출입 현황(확정치).hwp` 의 U+2007), 11 「AI에게 맡기기」 버튼(클립보드, 대체 경로, 좁은 폭, 레이아웃 불변).
 
 ## 알려진 한계
 

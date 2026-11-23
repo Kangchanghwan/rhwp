@@ -14,9 +14,12 @@ import { StudioCommandError } from '../../rhwp-studio/src/core/command-error';
 import {
   NEW_TOOL_DEFS, findNewToolDef, validateSchema, summarizeTables, findTable, readTableData, tableCells, cellText,
   planSetCells, applyCellOps, verifyCellOps, planFillFields, verifyFills, validatePlanShape,
-  PLAN_FORBIDDEN_TOOLS, findProducedByEarlierStep, buildHelp,
+  PLAN_FORBIDDEN_TOOLS, findProducedByEarlierStep, buildHelp, resolveLocator, findNormalized,
 } from './agent-tools-pure';
-import type { TableDoc, TableWriter, TableRef, FieldRow, PlanIssue } from './agent-tools-pure';
+import type { TableDoc, TableWriter, TableRef, FieldRow, PlanIssue, SearchDoc } from './agent-tools-pure';
+
+/** 문서 안의 글을 가리키는 인자 이름(스키마에 있을 때만 공백 관용 찾기를 적용한다). */
+export const LOCATING_ARGS = ['find', 'after'] as const;
 
 export type ToolGroup = 'read' | 'write' | 'command';
 
@@ -195,6 +198,41 @@ export function createAgentToolsCore(host: PluginHost) {
   });
   const countHits = (query: string): number => readDoc((d) => (JSON.parse(d.searchAllText(query, true, true)) as unknown[]).length);
 
+  // ───────────── 공백 관용 찾기 ─────────────
+
+  const schemaProps = (name: string): Record<string, unknown> | null => {
+    const t = listTools().find((x) => x.name === name);
+    return (t?.inputSchema.properties as Record<string, unknown> | undefined) ?? null;
+  };
+
+  interface LocatorNotes { matchedText: string; arg: string }
+  /**
+   * find/after 가 문서에 정확히 없으면 공백 관용으로 문서의 정확한 글을 찾아 바꿔 넣는다. 정확히 있으면 손대지 않는다.
+   * 없으면 그대로 둔다(upstream 이 TARGET_NOT_FOUND). 모호하면 AMBIGUOUS_TARGET 응답.
+   */
+  function resolveArgs(name: string, args: Record<string, unknown>): { args: Record<string, unknown>; notes: LocatorNotes | null; error?: ToolResponse } {
+    const props = schemaProps(name);
+    if (!props) return { args, notes: null };
+    for (const arg of LOCATING_ARGS) {
+      const v = args[arg];
+      if (!(arg in props) || typeof v !== 'string' || v.length === 0) continue;
+      const occ = typeof args.occurrence === 'number' ? args.occurrence : undefined;
+      let r;
+      try { r = readDoc((d) => resolveLocator(d as unknown as SearchDoc, v, occ, 'occurrence' in props)); } catch { continue; }
+      if (r.kind === 'error') return { args, notes: null, error: fail(r.code, r.message) };
+      if (r.kind !== 'normalized') continue;
+      const next: Record<string, unknown> = { ...args, [arg]: r.find };
+      if (r.occurrence !== undefined) next.occurrence = r.occurrence;
+      return { args: next, notes: { matchedText: r.matchedText, arg } };
+    }
+    return { args, notes: null };
+  }
+
+  const withNotes = (res: ToolResponse, notes: LocatorNotes | null): ToolResponse => (
+    notes && res.ok && res.result && typeof res.result === 'object' && !Array.isArray(res.result)
+      ? { ok: true, result: { ...(res.result as object), normalizedMatch: true, matchedText: notes.matchedText } }
+      : res);
+
   // ───────────── 새 도구: 표 ─────────────
 
   const noTable = (table: number): ToolResponse => {
@@ -338,12 +376,14 @@ export function createAgentToolsCore(host: PluginHost) {
     try {
       if (findNewToolDef(name)) return newToolSync(name, args, false, true);
       if (isWriteTool(name)) {
-        const proposal = prepareWrite(writeHost as never, { id: 'cs', name, input: args } as never);
+        const rr = resolveArgs(name, args);
+        if (rr.error) return rr.error;
+        const proposal = prepareWrite(writeHost as never, { id: 'cs', name, input: rr.args } as never);
         if (proposal.file) return fail('FILE_REQUIRED', `${name} needs a file and cannot run inside a plan.`);
-        const verify = capturePre(name, args, proposal);
+        const verify = capturePre(name, rr.args, proposal);
         const r = proposal.apply() as unknown;
         if (r && typeof (r as Promise<unknown>).then === 'function') throw new Error(`${name} is asynchronous and cannot run inside a plan.`);
-        return { ok: true, result: writeResult(proposal, verify) };
+        return withNotes({ ok: true, result: writeResult(proposal, verify) }, rr.notes);
       }
       const res = executeReadTool(toolHost as never, { id: 'cs', name, input: args } as never, createBoundaryId());
       if (res.isError) return fail(/^Invalid input/.test(res.content) ? 'INVALID_INPUT' : 'READ_FAILED', res.content);
@@ -395,9 +435,12 @@ export function createAgentToolsCore(host: PluginHost) {
           return undefined;
         }
         if (isWriteTool(tool)) {
-          const proposal = prepareWrite(writeHost as never, { id: 'cs', name: tool, input: args } as never);
+          const rr = resolveArgs(tool, args);
+          if (rr.error && !rr.error.ok) return bad(rr.error.error.code, rr.error.error.message);
+          const proposal = prepareWrite(writeHost as never, { id: 'cs', name: tool, input: rr.args } as never);
           if (proposal.file) return bad('STEP_NOT_ALLOWED', `${tool} needs a file and cannot run inside a plan.`);
-          previews.push({ index, tool, preview: dryRunResult(proposal) });
+          const pv = withNotes({ ok: true, result: dryRunResult(proposal) }, rr.notes);
+          previews.push({ index, tool, preview: pv.ok ? pv.result : null });
           return undefined;
         }
         const res = executeReadTool(toolHost as never, { id: 'cs', name: tool, input: args } as never, createBoundaryId());
@@ -480,19 +523,34 @@ export function createAgentToolsCore(host: PluginHost) {
       }
       if (findNewToolDef(name)) return newToolSync(name, input, dry, false);
       if (isWriteTool(name)) {
-        const proposal = prepareWrite(writeHost as never, call as never);
-        if (dry) return { ok: true, result: dryRunResult(proposal) };
-        return await applyProposal(proposal, options, name, input);
+        const rr = resolveArgs(name, input);
+        if (rr.error) return rr.error;
+        const proposal = prepareWrite(writeHost as never, { ...call, input: rr.args } as never);
+        if (dry) return withNotes({ ok: true, result: dryRunResult(proposal) }, rr.notes);
+        return withNotes(await applyProposal(proposal, options, name, rr.args), rr.notes);
       }
       if (isCommandTool(name)) {
         if (dry && name !== 'list_commands' && name !== 'select_text') return fail('DRYRUN_UNSUPPORTED', 'dryRun is not supported for run_command.');
         if (name === 'list_commands') return { ok: true, result: listAllowedCommands(commandHost as never) };
-        if (name === 'select_text') return { ok: true, result: selectText(commandHost as never, call as never) };
+        if (name === 'select_text') {
+          const rr = resolveArgs(name, input);
+          if (rr.error) return rr.error;
+          return withNotes({ ok: true, result: selectText(commandHost as never, { ...call, input: rr.args } as never) }, rr.notes);
+        }
         return await applyProposal(prepareCommand(commandHost as never, call as never));
       }
       const res = executeReadTool(toolHost as never, call as never, createBoundaryId());
       if (res.isError) return fail(/Unknown tool/.test(res.content) ? 'UNKNOWN_TOOL' : /^Invalid input/.test(res.content) ? 'INVALID_INPUT' : 'READ_FAILED', res.content);
-      return { ok: true, result: unwrapDocumentContent(res.content) };
+      const out = unwrapDocumentContent(res.content) as Record<string, unknown>;
+      if (name === 'search_text' && out && out.totalHits === 0 && typeof input.query === 'string') {
+        // 정확히는 없지만 공백 종류·개수만 다른 글이 있으면 알려 준다(검색 결과 자체는 정확 일치 기준 그대로).
+        try {
+          const counts = new Map<string, number>();
+          for (const m of readDoc((d) => findNormalized(d as unknown as SearchDoc, input.query as string))) counts.set(m.text, (counts.get(m.text) ?? 0) + 1);
+          if (counts.size > 0) out.normalizedMatches = [...counts].slice(0, 10).map(([matchedText, count]) => ({ matchedText, count }));
+        } catch { /* 힌트일 뿐 */ }
+      }
+      return { ok: true, result: out };
     } catch (error) {
       if (error instanceof StudioCommandError) await error.report.catch(() => undefined);
       return errorToResponse(error);
