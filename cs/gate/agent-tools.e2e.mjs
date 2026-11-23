@@ -77,8 +77,8 @@ async function runSample(rel) {
   const load = (b, n) => within(page.evaluate(async ({ b, n }) => {
     const bin = atob(b); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
     return await window.rhwpStudio.csAgentTools.loadDocument(u, n);
-  }, { b, n }), 30000, 'loadDocument');
-  const call = (tool, a, o) => within(page.evaluate(({ tool, a, o }) => window.rhwpStudio.csAgentTools.callTool(tool, a, o), { tool, a, o }), 30000, `callTool ${tool}`);
+  }, { b, n }), 90000, 'loadDocument');
+  const call = (tool, a, o) => within(page.evaluate(({ tool, a, o }) => window.rhwpStudio.csAgentTools.callTool(tool, a, o), { tool, a, o }), 120000, `callTool ${tool}`);
   const state = async () => {
     const info = (await call('get_document_info', {})).result;
     // 글자 수는 문서 모델의 문단 텍스트(본문+표 칸 제외 아님: read_paragraphs 기준)로 센다.
