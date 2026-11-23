@@ -49,14 +49,17 @@ cs/scripts/sync-upstream.sh v0.9.2   # 태그를 지정
 
 필요한 시크릿: `CLOUDFLARE_API_TOKEN`(Pages 쓰기), `CLOUDFLARE_ACCOUNT_ID`.
 
-로컬에서 `cs/agent` 만 고칠 때: `cd cs && npm ci && npm test`. Rust/WASM 빌드는 로컬에 도구가 없으면 Actions 에서만 합니다.
+로컬에서 `cs/agent`·`cs/studio` 순수 로직만 고칠 때: `cd cs && npm ci && npm test`. Rust/WASM 빌드는 로컬에 도구가 없으면 Actions 에서만 합니다.
 ## 에이전트 도구 플러그인 (`cs-agent-tools`, 3단계)
 
-AI 채팅 패널 없이 문서 도구(읽기 8·쓰기 29·명령 3 = 40개, `create_document` 제외)를 직접 호출한다. 코드는 `cs/studio/`, 설계는 `cs/docs/AI_TOOLS_FINDINGS.ko.md`.
+AI 채팅 패널 없이 문서 도구(읽기 8·쓰기 29·명령 3 = 40개, `create_document` 제외 + 새 도구 5개 = 45개)를 직접 호출한다. 코드는 `cs/studio/`, 설계는 `cs/docs/AI_TOOLS_FINDINGS.ko.md`.
 
-**호출 (같은 페이지)** — 처음 부를 때 플러그인을 올린다(시작 때 자동 로드 없음):
+**API v2 (`window.hwpAgent`, 서버 없음)** — 어떤 브라우저 에이전트든 같은 페이지에서 `await hwpAgent.help()` 로 사용 설명서를 읽고 시작한다. 시작 때 `<meta name="ai-agent-api">` 를 넣고, WebMCP(`document.modelContext.registerTool`)가 있으면 도구를 등록한다. 새 도구: `list_tables`, `read_table`, `set_cells`(검증 후 한 번에, 병합에 덮인 칸은 `COVERED_BY_MERGE`), `fill_fields`(`notFound`/`ambiguous` 보고), `run_plan`(사전 검증 + 전부 아니면 전무 + undo 1번). `callTool(name, args, {dryRun:true})` 는 문서를 바꾸지 않고 바뀔 내용만 보고하며, `replace_text`/`set_cell_text`/`set_cells`/`fill_fields` 결과에는 다시 읽어 확인한 `verified` 가 붙는다. `find`/`after` 는 정확히 못 찾을 때만 공백 종류·개수를 무시해 다시 찾고(`normalizedMatch`, `matchedText`), 메뉴 바 오른쪽 「AI에게 맡기기」 버튼이 에이전트용 안내문(`hwpAgent.agentPrompt`)을 복사한다. 전체 설명: [docs/AGENT_API.ko.md](docs/AGENT_API.ko.md).
+
+**호출 (같은 페이지)** — 처음 부를 때 플러그인을 올린다(시작 때 자동 로드 없음). `window.hwpAgent` 는 아래 `csAgentTools` 와 같은 객체다:
 ```js
-const t = window.rhwpStudio.csAgentTools;
+const t = window.rhwpStudio.csAgentTools;   // = window.hwpAgent
+await t.help();                                        // 사용 설명서 문자열
 await t.listTools();                                   // [{name, group, description, inputSchema, headless, requires?}]
 await t.callTool('replace_text', { find, replace });   // {ok:true,result} | {ok:false,error:{code,message}}
 await t.callTool('insert_picture', args, { picture: { dataBase64 } });   // headless:false 도구는 options 필요
@@ -66,7 +69,7 @@ await t.loadDocument(bytes, 'a.hwpx');                 // 로컬 글꼴 모달 �
 ```
 **호출 (iframe 부모)** — embed RPC: `pluginLoad('cs-agent-tools')` 후 `pluginInvoke('cs-agent-tools', 'callTool', [name, args])` (`listTools`, `undo`, `redo`, `exportDocument`, `loadDocument` 도 같은 방식).
 
-쓰기는 자동 적용이고 호출 1회 = undo 1스텝. 오류 코드: `TARGET_NOT_FOUND`(없는 글을 찾음 → 변경 안 됨), `AMBIGUOUS_TARGET`, `INVALID_INPUT`, `UNKNOWN_TOOL`, `FILE_REQUIRED`, `DOCUMENT_RELEASED`, `APPLY_FAILED`, `REFUSED`.
+쓰기는 자동 적용이고 호출 1회 = undo 1스텝. 오류 코드: `TARGET_NOT_FOUND`(없는 글을 찾음 → 변경 안 됨), `AMBIGUOUS_TARGET`, `INVALID_INPUT`, `UNKNOWN_TOOL`, `FILE_REQUIRED`, `DOCUMENT_RELEASED`, `APPLY_FAILED`, `REFUSED`, 그리고 v2: `COVERED_BY_MERGE`, `OUT_OF_RANGE`, `TABLE_NOT_FOUND`, `MULTI_PARAGRAPH_CELL`, `PLAN_INVALID`, `PLAN_FAILED`, `STEP_NOT_ALLOWED`, `DRYRUN_UNSUPPORTED`.
 `headless:false`: `insert_picture`(그림 바이트 필요), `select_text`·`run_command`·`get_selection`(편집기 선택·화면 필요).
 읽기 결과는 문서 본문이라 비신뢰 데이터다(프롬프트 주입 주의). 호출은 내부에서 직렬화된다.
 
@@ -76,4 +79,4 @@ await t.loadDocument(bytes, 'a.hwpx');                 // 로컬 글꼴 모달 �
 
 ### 검사
 
-`node cs/gate/agent-tools.e2e.mjs` — `RHWP_WITHOUT_AI=1` 로 빌드해(또는 `--dist <dir>`) 헤드리스 Chromium 에서 .hwpx·.hwp 각각 8단계를 돌리고 `cs/gate/agent-tools.report.json`(gitignore)에 쓴다. 필요: `pkg/`(= `@rhwp/core` 0.9.1 npm 파일, 커밋 금지), `playwright`(없으면 `PLAYWRIGHT_DIR=<node_modules 가 있는 폴더>`).
+`node cs/gate/agent-tools.e2e.mjs` — `RHWP_WITHOUT_AI=1` 로 빌드해(또는 `--dist <dir>`) 헤드리스 Chromium 에서 .hwpx·.hwp 각각 단계(기본 8 + 새 API 시나리오 9a~9g, 공백 10, 버튼 11)를 돌리고 `cs/gate/agent-tools.report.json`(gitignore)에 쓴다. 필요: `pkg/`(= `@rhwp/core` 0.9.1 npm 파일, 커밋 금지), `playwright`(없으면 `PLAYWRIGHT_DIR=<node_modules 가 있는 폴더>`).
