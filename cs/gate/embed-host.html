@@ -62,7 +62,7 @@ window.__embedCall = call
       const before = await agent.outline()
       r.paraCount = before.length
       // 글 한 곳 고치기: 첫 글 있는 문단의 뒤에 표지를 붙인다
-      const target = before.find((p) => p.text && p.text.trim().length > 0)
+      const target = before.find((p) => p.text && p.text.trim().length > 0 && !p.controls.length) || before[0]; r.outlineLen = before.length
       const idx = target.i
       r.editedPara = idx
       const mark = ` 게이트${name.length}표지`

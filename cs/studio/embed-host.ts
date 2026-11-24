@@ -23,6 +23,22 @@ export function csEmbedFileCommands(cmds: readonly CommandDef[], onSaveRequest: 
     .map((c) => (c.id.startsWith('file:save') ? { ...c, execute: () => { onSaveRequest(); } } : c));
 }
 
+/** 문서 교체 진입점(열기·새 문서·최근 문서·문서 비교)의 메뉴·툴바 항목을 지운다 (main.ts pruneEmbedChrome 과 같은 정리) */
+export function csPruneEmbedChrome(): void {
+  for (const id of [...REPLACE_IDS, 'edit:compare-documents']) {
+    document.querySelectorAll(`[data-cmd="${id}"]`).forEach((item) => item.remove());
+  }
+  const dropdown = document.querySelector('.menu-item[data-menu="file"] .menu-dropdown');
+  if (!dropdown) return;
+  dropdown.querySelectorAll('.md-sub[data-recent]').forEach((sub) => sub.remove());
+  dropdown.querySelectorAll('.md-sep').forEach((sep) => {
+    const prev = sep.previousElementSibling;
+    if (!prev || prev.classList.contains('md-sep')) sep.remove();
+  });
+  const last = dropdown.lastElementChild;
+  if (last?.classList.contains('md-sep')) last.remove();
+}
+
 interface Bus {
   on(event: string, handler: (...args: any[]) => void): () => void;
   emit(event: string, ...args: unknown[]): void;

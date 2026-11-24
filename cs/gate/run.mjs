@@ -358,6 +358,8 @@ try {
       if (!(em.saveRequestsByMenu >= 1)) fail(`파일 > 저장 이 saveRequest 를 보내지 않았습니다 (${em.saveRequestsByMenu})`)
       if (downloads.length) fail(`편집기가 스스로 내려받기를 했습니다: ${downloads.join(', ')}`)
       if (em.dialogsOpen && em.dialogsOpen.length) fail(`embed 에서 대화상자가 떠 있습니다: ${em.dialogsOpen.join(', ')}`)
+      if (em.menuVisibleOpenItems && em.menuVisibleOpenItems.length) fail(`embed 파일 메뉴에 문서 교체 항목이 남았습니다: ${em.menuVisibleOpenItems.join(', ')}`)
+      if (r.chrome && o.chromeAfterLight && r.chrome.bg === o.chromeAfterLight.bg) fail('theme=dark 로 열었는데 setTheme light 뒤에도 chrome.bg 가 같습니다')
       if (em.startScreen) fail('embed 에서 시작 화면이 보입니다')
       if (o.errors.length) fail(`embed error 이벤트: ${JSON.stringify(o.errors)}`)
       if (!o.chromeAfterLight && !(o.chromeEvents >= 1)) fail('setTheme 뒤 chrome 이벤트가 없습니다')
