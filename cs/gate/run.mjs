@@ -323,6 +323,7 @@ try {
       em.menuVisibleOpenItems = await sframe.evaluate(() => ['file:new-doc', 'file:open'].filter((id) => document.querySelector(`[data-cmd="${id}"]`) && getComputedStyle(document.querySelector(`[data-cmd="${id}"]`)).display !== 'none'))
       em.dialogsOpen = await sframe.evaluate(() => Array.from(document.querySelectorAll('.dialog-title')).map((t) => t.textContent))
       em.startScreen = await sframe.evaluate(() => !!document.querySelector('.start-screen, #start-screen, .home-screen'))
+      em.handOffButtonInEmbed = await sframe.evaluate(() => !!document.getElementById('cs-ai-handoff'))
       await ep.evaluate(() => { window.__embed.keysDone = true })
     }
     await ep.waitForFunction(() => window.__embed.done, null, { timeout: 120_000, polling: 250 })
@@ -360,6 +361,7 @@ try {
       if (em.dialogsOpen && em.dialogsOpen.length) fail(`embed 에서 대화상자가 떠 있습니다: ${em.dialogsOpen.join(', ')}`)
       if (em.menuVisibleOpenItems && em.menuVisibleOpenItems.length) fail(`embed 파일 메뉴에 문서 교체 항목이 남았습니다: ${em.menuVisibleOpenItems.join(', ')}`)
       if (r.chrome && o.chromeAfterLight && r.chrome.bg === o.chromeAfterLight.bg) fail('theme=dark 로 열었는데 setTheme light 뒤에도 chrome.bg 가 같습니다')
+      if (em.handOffButtonInEmbed !== false) fail(`embed=cs 인데 「AI에게 맡기기」 버튼이 있습니다 (${em.handOffButtonInEmbed})`)
       if (em.startScreen) fail('embed 에서 시작 화면이 보입니다')
       if (o.errors.length) fail(`embed error 이벤트: ${JSON.stringify(o.errors)}`)
       if (!o.chromeAfterLight && !(o.chromeEvents >= 1)) fail('setTheme 뒤 chrome 이벤트가 없습니다')
@@ -377,6 +379,8 @@ try {
       skin: document.documentElement.dataset.themeSkin || 'default',
     }))
     const th = report.checks.themeAfterCommands
+    report.checks.handOffButtonDirect = await studioFrame.evaluate(() => !!document.getElementById('cs-ai-handoff'))
+    if (!report.checks.handOffButtonDirect) fail('직접 접속(embed 아님)에서 「AI에게 맡기기」 버튼이 없습니다')
     if (th.effective !== 'dark' || th.skin !== 'flat') fail(`테마 커맨드가 적용되지 않았습니다: ${JSON.stringify(th)}`)
     report.checks.serviceWorkers = await studioFrame.evaluate(async () =>
       navigator.serviceWorker ? (await navigator.serviceWorker.getRegistrations()).length : 0)
