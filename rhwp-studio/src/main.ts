@@ -124,6 +124,7 @@ import { initI18n, t } from '@/i18n/index.ts';
 import { SidePanelController, createDomSidePanelView } from '@/view/side-panel-host';
 import { navigateToSearchHit } from '@/ui/find-dialog';
 import { installCsAgentToolsGlobal } from '../../cs/studio/agent-tools-global'; // [cs]
+import { isCsEmbed, csEmbedFileCommands, installCsEmbedHost, CS_SAVE_REQUEST } from '../../cs/studio/embed-host'; // [cs]
 
 // 언어팩 초기화 — 정적 마크업의 라벨을 결정된 로케일로 갱신한다. 카탈로그에 없는 키는
 // 원문(ko)으로 물러나므로 번역이 없는 상태에서도 화면은 도입 전과 같다.
@@ -252,6 +253,7 @@ async function startDevelopmentRenderRuntime(): Promise<void> {
 // 파라미터가 없거나 미지원 값이면 full — 기존 표면 그대로다.
 const chromeModeRequest = resolveChromeModeRequest(window.location.search);
 const chromeMode = chromeModeRequest.mode;
+const csEmbed = isCsEmbed(window.location.search); // [cs] ?embed=cs: Clipboard Share 가 iframe 으로 쓴다 (cbEdit v1)
 if (chromeModeRequest.unsupportedReason) {
   console.warn(
     `[main] 지원하지 않는 chrome 값입니다: ${chromeModeRequest.requested}; full 프로파일을 사용합니다.`,
@@ -410,7 +412,7 @@ installCsAgentToolsGlobal(plugins, (window as any).rhwpStudio); // [cs]
 registry.registerAll(
   chromeMode === 'embed'
     ? fileCommands.filter((cmd) => !EMBED_HIDDEN_FILE_COMMAND_IDS.includes(cmd.id))
-    : fileCommands,
+    : csEmbed ? csEmbedFileCommands(fileCommands, () => eventBus.emit(CS_SAVE_REQUEST)) : fileCommands, // [cs]
 );
 registry.registerAll(
   chromeMode === 'embed'
@@ -930,12 +932,12 @@ async function initialize(): Promise<void> {
       await loadFromUrlParam();
       // embed 프로파일: 자동저장 복구 다이얼로그의 드래프트 복원도 호스트가 감지할 수
       // 없는 문서 교체 경로이므로 띄우지 않는다 (드래프트 기록 자체는 유지).
-      if (chromeMode !== 'embed') await offerAutosaveRecoveryIfIdle();
+      if (chromeMode !== 'embed' && !csEmbed) await offerAutosaveRecoveryIfIdle(); // [cs]
       await openBlankDocumentIfIdle();
     })();
     // embed 프로파일: PWA launch queue로 문서를 넘겨받는 진입도 문서 교체 경로이므로
     // 설치하지 않는다.
-    if (chromeMode !== 'embed') {
+    if (chromeMode !== 'embed' && !csEmbed) { // [cs]
       installPwaFileHandling(window as FileHandlingWindowLike, {
         openDocumentBytes(payload) {
           eventBus.emit('open-document-bytes', payload);
@@ -1118,7 +1120,7 @@ function setupFileInput(): void {
     const isDoc = isSupportedDocumentFileName(dropName, wasm.hasPdfImportCapability());
     // embed 프로파일: 문서 드롭은 호스트가 감지할 수 없는 문서 교체 경로이므로 무시한다.
     // 이미지 드롭은 수명주기가 아니라 편집 기능이라 그대로 둔다.
-    if (chromeMode === 'embed' && isDoc) return;
+    if ((chromeMode === 'embed' || csEmbed) && isDoc) return; // [cs]
     if (!isImage && !isDoc) {
       alert(unsupportedDocumentMessage(dropName, wasm.hasPdfImportCapability(), true));
       return;
@@ -2106,7 +2108,7 @@ async function createNewDocument(): Promise<void> {
  * 건드리지 않는다. embed 프로파일은 호스트가 문서 교체를 통제하므로 제외한다.
  */
 async function openBlankDocumentIfIdle(): Promise<void> {
-  if (chromeMode === 'embed') return;
+  if (chromeMode === 'embed' || csEmbed) return; // [cs]
   if (documentOpenSession.pending) return;
   if (wasm.pageCount > 0 || documentState.isDirty()) return;
   await createNewDocument();
@@ -2302,7 +2304,7 @@ const initPromise = initialize();
 // 소모되는 것을 막는다.
 void initPromise.then(() => {
   if (!rendererInitialized) return;
-  maybeShowSkinOnboarding();
+  if (!csEmbed) maybeShowSkinOnboarding(); // [cs]
   // 내장 AI 도우미. 최상위 창의 studio 에서만 자동으로 올린다 — iframe 으로 넣은 studio 는
   // 호스트가 고른 플러그인만 가진다(`plugins.load('ai-assistant')` 로 직접 올릴 수는 있다).
   // 실패해도 편집기는 그대로 쓸 수 있어야 하므로 로그만 남긴다.
@@ -2310,6 +2312,18 @@ void initPromise.then(() => {
     plugins.load('ai-assistant').catch((error) => console.error('[main] AI 도우미 로드 실패', error));
   }
 });
+
+if (csEmbed) { // [cs] cbEdit v1 낮은 층 (부모와의 postMessage 는 cs/agent/editBridge.js)
+  installCsEmbedHost({
+    eventBus, documentState, wasm,
+    ready: initPromise,
+    loadPlugin: (id) => plugins.load(id),
+    openBytes: (data, name) => loadBytes(data, name, null, undefined, { suppressDialogs: true }),
+    isOpening: () => documentOpenSession.pending,
+    markSaved: () => completeHostSave(),
+    getCommandStatus: () => inputHandler?.getCommandErrorState() ?? null,
+  });
+}
 
 installEmbedRuntime({
   hostWindow: window,

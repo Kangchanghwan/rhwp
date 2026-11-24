@@ -166,7 +166,7 @@ const fail = (msg) => { report.errors.push(msg) }
 
 const headerRules = parseHeaders(readFileSync(join(outDir, '_headers'), 'utf8'))
 const studioSrv = staticServer(outDir, { headerRules, brotli: true })
-const hostSrv = staticServer(here, { extra: { '/node_modules/@rhwp/editor/': join(root, 'node_modules', '@rhwp', 'editor'), '/agent/': join(root, 'agent') } })
+const hostSrv = staticServer(here, { extra: { '/node_modules/@rhwp/editor/': join(root, 'node_modules', '@rhwp', 'editor'), '/agent/': join(root, 'agent'), '/samples/': join(root, '..', 'rhwp-studio', 'public', 'samples') } })
 const studioPort = await listen(studioSrv)
 const hostPort = await listen(hostSrv)
 const studioOrigin = `http://127.0.0.1:${studioPort}`
@@ -291,6 +291,78 @@ try {
       if (!r.hasMarkerEdited) fail(`샘플 ${r.name} 에 넣은 글이 편집 직후 보이지 않습니다`)
       if (!(r.exportedBytes > 0) || !(r.pagesAfter >= 1) || !r.hasMarkerAfterReload) fail(`샘플 ${r.name} 내보내기 후 다시 열기가 실패했습니다: ${JSON.stringify(r)}`)
     }
+  }
+
+
+  // cbEdit v1: ?embed=cs 로 iframe 에 넣고 규약대로만 대화한다 (ready -> open hwpx/hwp -> 고치기 -> dirty -> export -> 다시 open)
+  if (!report.errors.length) {
+    const ep = await context.newPage()
+    const epErrors = []
+    const downloads = []
+    ep.on('pageerror', (e) => epErrors.push(String(e).slice(0, 300)))
+    ep.on('download', (d) => downloads.push(d.suggestedFilename()))
+    const eurl = `${hostOrigin}/embed-host.html?studio=${encodeURIComponent(studioOrigin + '/')}` +
+      `&hwpx=${encodeURIComponent('/samples/form-002.hwpx')}&hwp=${encodeURIComponent('/samples/biz_plan.hwp')}`
+    await ep.goto(eurl, { waitUntil: 'commit', timeout: 15_000 })
+    await ep.waitForFunction(() => window.__embed && (window.__embed.readyForKeys || window.__embed.done), null, { timeout: 200_000, polling: 250 })
+    const sframe = ep.frames().find((f) => f.url().startsWith(studioOrigin))
+    const em = report.checks.embed = { downloads, pageErrors: epErrors }
+    if (sframe && (await ep.evaluate(() => window.__embed.readyForKeys))) {
+      // 편집기 안에서 사람이 Ctrl+S 와 파일 > 저장 을 누른다: 내려받기 대신 saveRequest
+      const before = await ep.evaluate(() => window.__embed.events.filter((e) => e.event === 'saveRequest').length)
+      await sframe.locator('#scroll-container').click({ position: { x: 300, y: 200 }, timeout: 15000 }).catch(() => {})
+      await ep.keyboard.press('Control+s')
+      await ep.waitForTimeout(800)
+      const mid = await ep.evaluate(() => window.__embed.events.filter((e) => e.event === 'saveRequest').length)
+      em.saveRequestsByShortcut = mid - before
+      await sframe.locator('#menu-bar .menu-item', { hasText: '파일' }).first().click({ timeout: 10000 }).catch(() => {})
+      await sframe.locator('[data-cmd="file:save"]').first().click({ timeout: 10000 }).catch(() => {})
+      await ep.waitForTimeout(800)
+      const end = await ep.evaluate(() => window.__embed.events.filter((e) => e.event === 'saveRequest').length)
+      em.saveRequestsByMenu = end - mid
+      em.menuVisibleOpenItems = await sframe.evaluate(() => ['file:new-doc', 'file:open'].filter((id) => document.querySelector(`[data-cmd="${id}"]`) && getComputedStyle(document.querySelector(`[data-cmd="${id}"]`)).display !== 'none'))
+      em.dialogsOpen = await sframe.evaluate(() => Array.from(document.querySelectorAll('.dialog-title')).map((t) => t.textContent))
+      em.startScreen = await sframe.evaluate(() => !!document.querySelector('.start-screen, #start-screen, .home-screen'))
+      await ep.evaluate(() => { window.__embed.keysDone = true })
+    }
+    await ep.waitForFunction(() => window.__embed.done, null, { timeout: 120_000, polling: 250 })
+    const eg = await ep.evaluate(() => window.__embed)
+    em.steps = eg.steps?.map((s) => s.name)
+    if (!eg.ok) fail(`cbEdit embed 실패: ${eg.error}`)
+    else {
+      const o = eg.out
+      em.out = { ...o, ready: { ...o.ready, accepts: o.ready.accepts } }
+      const r = o.ready
+      if (r.editor !== 'hwp' || !Array.isArray(r.accepts) || !r.accepts.includes('hwp') || !r.accepts.includes('hwpx')) fail(`cbEdit ready 내용이 다릅니다: ${JSON.stringify(r)}`)
+      if (!r.chrome || !r.chrome.bg || !r.chrome.fg || !r.chrome.border) fail(`cbEdit ready.chrome 이 없습니다: ${JSON.stringify(r.chrome)}`)
+      if (o.stateEmpty.loaded !== false) fail('open 전 state.loaded 가 false 가 아닙니다')
+      if (o.unknown !== 'INTERNAL' && o.unknown !== 'UNKNOWN_METHOD') fail(`알 수 없는 method 응답: ${o.unknown}`)
+      if (o.unknown === 'INTERNAL') fail('알 수 없는 method 가 UNKNOWN_METHOD 가 아닙니다')
+      if (o.unsupported !== 'UNSUPPORTED') fail(`docx open 이 UNSUPPORTED 가 아닙니다: ${o.unsupported}`)
+      if (o.noDocument !== 'NO_DOCUMENT') fail(`문서 없이 export 가 NO_DOCUMENT 가 아닙니다: ${o.noDocument}`)
+      for (const s of o.samples) {
+        if (!(s.open.pages >= 1)) fail(`embed ${s.name}: open 쪽 수가 없습니다`)
+        if (!s.stateOpen.loaded || s.stateOpen.dirty !== false || s.stateOpen.name !== s.name) fail(`embed ${s.name}: open 직후 state 가 다릅니다 ${JSON.stringify(s.stateOpen)}`)
+        if (!s.dirtyEventAfterEdit || s.stateEdited.dirty !== true) fail(`embed ${s.name}: 고친 뒤 dirty 이벤트·state 가 없습니다`)
+        if (s.stateAfterExport.dirty !== true) fail(`embed ${s.name}: export 가 dirty 를 바꿨습니다`)
+        if (s.exportExt !== s.name.split('.').pop()) fail(`embed ${s.name}: 원래 형식 export ext=${s.exportExt}`)
+        if (!(s.exportBytes > 1000) || !(s.exportOther.bytes > 1000)) fail(`embed ${s.name}: export 바이트가 너무 작습니다`)
+        if (!s.markKept) fail(`embed ${s.name}: 내보내 다시 연 문서에 고친 글이 없습니다`)
+        if (!s.markKeptOtherFormat) fail(`embed ${s.name}: 다른 형식(${s.exportOther.ext})으로 내보내 다시 연 문서에 고친 글이 없습니다`)
+        if (s.stateReopen.dirty !== false) fail(`embed ${s.name}: 다시 연 문서의 dirty 가 false 가 아닙니다`)
+        if (s.dirtyAfterMarkSaved !== false) fail(`embed ${s.name}: markSaved 뒤 dirty 가 false 가 아닙니다`)
+      }
+      const seq = o.dirtySequence
+      if (seq.some((v, i) => i > 0 && v === seq[i - 1])) fail(`dirty 이벤트가 같은 값을 반복했습니다: ${JSON.stringify(seq)}`)
+      if (!(em.saveRequestsByShortcut >= 1)) fail(`Ctrl+S 가 saveRequest 를 보내지 않았습니다 (${em.saveRequestsByShortcut})`)
+      if (!(em.saveRequestsByMenu >= 1)) fail(`파일 > 저장 이 saveRequest 를 보내지 않았습니다 (${em.saveRequestsByMenu})`)
+      if (downloads.length) fail(`편집기가 스스로 내려받기를 했습니다: ${downloads.join(', ')}`)
+      if (em.dialogsOpen && em.dialogsOpen.length) fail(`embed 에서 대화상자가 떠 있습니다: ${em.dialogsOpen.join(', ')}`)
+      if (em.startScreen) fail('embed 에서 시작 화면이 보입니다')
+      if (o.errors.length) fail(`embed error 이벤트: ${JSON.stringify(o.errors)}`)
+      if (!o.chromeAfterLight && !(o.chromeEvents >= 1)) fail('setTheme 뒤 chrome 이벤트가 없습니다')
+    }
+    await ep.close()
   }
 
   // service worker and CSP checks inside the cross-origin studio frame

@@ -280,7 +280,7 @@ for (const f of walk(outDir)) {
 
 // agent: Clipboard Share 의 AI 편집 함수(agent/*.js)를 studio 페이지에 함께 싣는다. 같은 출처라 facade 등을 직접 쓰고,
 // 부모와는 agent/bridge.js 의 postMessage 창구로만 대화한다. 내용 해시 폴더라 /assets/* 의 immutable 캐시를 그대로 쓴다.
-const AGENT_FILES = ['entry.js', 'bridge.js', 'hwpAgent.js', 'hwpAgentMethods.js']
+const AGENT_FILES = ['entry.js', 'bridge.js', 'editBridge.js', 'editHost.js', 'hwpAgent.js', 'hwpAgentMethods.js']
 const agentSrc = join(root, 'agent')
 const agentHash = createHash('sha256')
 for (const f of AGENT_FILES) agentHash.update(f).update(readFileSync(join(agentSrc, f)))

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>hwp-editor gate: cbEdit embed host</title>
+<style>html,body{margin:0;height:100%}iframe{width:1200px;height:800px;border:0}</style>
+</head>
+<body>
+<iframe id="f" title="editor"></iframe>
+<script type="module">
+// Clipboard Share 가 할 것과 같게 편집기를 ?embed=cs 로 iframe 에 넣고 cbEdit v1 로만 대화한다 (@rhwp/editor 미사용).
+// 결과는 window.__embed 에 쌓고 gate/run.mjs 가 읽는다.
+const params = new URLSearchParams(location.search)
+const studio = new URL(params.get('studio')).origin
+const frame = document.getElementById('f')
+const events = []
+const pending = new Map()
+let seq = 0
+window.__embed = { done: false, steps: [], events }
+const step = (name, data) => window.__embed.steps.push({ name, at: Math.round(performance.now()), ...(data || {}) })
+
+window.addEventListener('message', (ev) => {
+  if (ev.origin !== studio || ev.source !== frame.contentWindow) return
+  const d = ev.data
+  if (!d || d.cbEdit !== 1) return
+  if (d.event) { events.push({ ...d, at: Math.round(performance.now()) }); return }
+  const p = pending.get(d.id)
+  if (p) { pending.delete(d.id); p(d) }
+})
+const call = (method, args, ms = 60000) => new Promise((resolve, reject) => {
+  const id = `g${++seq}`
+  const t = setTimeout(() => { pending.delete(id); reject(new Error(`${method}: 응답 없음`)) }, ms)
+  pending.set(id, (d) => { clearTimeout(t); d.ok ? resolve(d.result) : reject(Object.assign(new Error(d.error.message), { code: d.error.code })) })
+  frame.contentWindow.postMessage({ cbEdit: 1, id, method, args }, studio)
+})
+const waitFor = async (cond, ms = 20000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const v = cond(); if (v) return v; await new Promise((r) => setTimeout(r, 50)) } return null }
+const fetchBytes = async (url) => (await (await fetch(url)).arrayBuffer())
+window.__embedCall = call
+
+;(async () => {
+  try {
+    frame.src = `${studio}/?embed=cs&theme=dark`
+    const ready = await waitFor(() => events.find((e) => e.event === 'ready'), 120000)
+    if (!ready) throw new Error('ready 이벤트가 오지 않았습니다')
+    step('ready', { ready })
+    const out = { ready, samples: [] }
+    out.stateEmpty = await call('state', {})
+    out.unknown = await call('nope', {}).then(() => null, (e) => e.code)
+    out.unsupported = await call('open', { name: 'a.docx', bytes: new ArrayBuffer(4) }).then(() => null, (e) => e.code)
+    out.noDocument = await call('export', {}).then(() => null, (e) => e.code)
+
+    const { createAgentClient } = await import('/agent/client.js')
+    const { AGENT_METHODS } = await import('/agent/hwpAgentMethods.js')
+    const agent = createAgentClient({ getFrameWindow: () => frame.contentWindow, origin: studio, methods: AGENT_METHODS })
+
+    for (const [name, url] of [['form-002.hwpx', params.get('hwpx')], ['biz_plan.hwp', params.get('hwp')]]) {
+      const r = { name }
+      const bytes = await fetchBytes(url)
+      const nDirtyBefore = events.filter((e) => e.event === 'dirty').length
+      r.open = await call('open', { name, bytes }, 120000)
+      r.stateOpen = await call('state', {})
+      const before = await agent.outline()
+      r.paraCount = before.length
+      // 글 한 곳 고치기: 첫 글 있는 문단의 뒤에 표지를 붙인다
+      const target = before.find((p) => p.text && p.text.trim().length > 0)
+      const idx = target.i
+      r.editedPara = idx
+      const mark = ` 게이트${name.length}표지`
+      await agent.replaceParagraph(idx, target.text + mark, { expect: target.text })
+      const dirtyEv = await waitFor(() => events.slice(nDirtyBefore).find((e) => e.event === 'dirty' && e.dirty === true), 10000)
+      r.dirtyEventAfterEdit = !!dirtyEv
+      r.stateEdited = await call('state', {})
+      const exp = await call('export', {})
+      r.exportExt = exp.ext; r.exportMime = exp.mime; r.exportBytes = exp.bytes.byteLength
+      r.stateAfterExport = await call('state', {}) // export 는 dirty 를 바꾸지 않는다
+      const other = exp.ext === 'hwp' ? 'hwpx' : 'hwp'
+      const exp2 = await call('export', { format: other })
+      r.exportOther = { ext: exp2.ext, bytes: exp2.bytes.byteLength }
+      // 다시 열어서 고친 글이 남았는지
+      const reopen = await call('open', { name: name.replace(/\.[^.]+$/, '') + '-re.' + exp.ext, bytes: exp.bytes }, 120000)
+      r.reopenPages = reopen.pages
+      const after = await agent.outline()
+      const at = (list) => (list.find((p) => p.i === idx) || {}).text || ''
+      r.markKept = at(after).includes(mark)
+      r.stateReopen = await call('state', {})
+      const reopen2 = await call('open', { name: 'x-' + name.replace(/\.[^.]+$/, '') + '.' + other, bytes: exp2.bytes }, 120000)
+      const after2 = await agent.outline()
+      r.markKeptOtherFormat = at(after2).includes(mark)
+      r.pagesOtherFormat = reopen2.pages
+      // markSaved: dirty 가 false 로 돌아오는지
+      await agent.replaceParagraph(idx, at(after2) + '!')
+      await waitFor(() => events.slice().reverse().find((e) => e.event === 'dirty')?.dirty === true, 10000)
+      await call('markSaved', {})
+      r.dirtyAfterMarkSaved = (await call('state', {})).dirty
+      out.samples.push(r)
+    }
+    // 저장 단축키: 내려받기 대신 saveRequest (부모 쪽에서 키를 누르는 것은 run.mjs)
+    window.__embed.readyForKeys = true
+    await waitFor(() => window.__embed.keysDone, 30000)
+    out.saveRequests = events.filter((e) => e.event === 'saveRequest').length
+    out.dirtySequence = events.filter((e) => e.event === 'dirty').map((e) => e.dirty)
+    out.chromeEvents = events.filter((e) => e.event === 'chrome').length
+    out.theme = await call('setTheme', { theme: 'light' })
+    await new Promise((r) => setTimeout(r, 300))
+    out.chromeAfterLight = events.filter((e) => e.event === 'chrome').at(-1)?.chrome || null
+    out.errors = events.filter((e) => e.event === 'error')
+    Object.assign(window.__embed, { done: true, ok: true, out })
+  } catch (e) {
+    Object.assign(window.__embed, { done: true, ok: false, error: String((e && e.stack) || e) })
+  }
+})()
+</script>
+</body>
+</html>
