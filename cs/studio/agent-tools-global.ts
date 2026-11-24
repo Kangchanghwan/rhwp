@@ -49,6 +49,11 @@ export async function copyText(text: string): Promise<boolean> {
   } catch { return false; }
 }
 
+/** Clipboard Share 수정 화면(?embed=cs)에서는 편집만 제공하므로 복사 버튼을 달지 않는다 */
+export function shouldShowHandOff(search: string): boolean {
+  return new URLSearchParams(search).get('embed') !== 'cs';
+}
+
 /** 메뉴 바 오른쪽(기본 도구 상자 접기 버튼 앞)에 작은 복사 버튼을 넣는다. 기존 메뉴 색·글꼴 토큰을 그대로 쓴다. */
 function installHandOffButton(): void {
   const mount = () => {
@@ -133,7 +138,7 @@ export function installCsAgentToolsGlobal(plugins: Registry, target: Record<stri
   } catch { /* 문서가 없는 환경 */ }
 
   // 1b) 「AI에게 맡기기」 복사 버튼 — 플러그인은 올리지 않는다.
-  installHandOffButton();
+  if (typeof location === 'undefined' || shouldShowHandOff(location.search)) installHandOffButton();
 
   // 2) WebMCP — 기능 감지. 없으면 아무것도 하지 않는다. 절대 던지지 않는다.
   try {
