@@ -280,7 +280,7 @@ for (const f of walk(outDir)) {
 
 // agent: Clipboard Share 의 AI 편집 함수(agent/*.js)를 studio 페이지에 함께 싣는다. 같은 출처라 facade 등을 직접 쓰고,
 // 부모와는 agent/bridge.js 의 postMessage 창구로만 대화한다. 내용 해시 폴더라 /assets/* 의 immutable 캐시를 그대로 쓴다.
-const AGENT_FILES = ['entry.js', 'bridge.js', 'editBridge.js', 'editHost.js', 'hwpAgent.js', 'hwpAgentMethods.js']
+const AGENT_FILES = ['entry.js', 'bridge.js', 'editBridge.js', 'editHost.js', 'directNotice.js', 'hwpAgent.js', 'hwpAgentMethods.js']
 const agentSrc = join(root, 'agent')
 const agentHash = createHash('sha256')
 for (const f of AGENT_FILES) agentHash.update(f).update(readFileSync(join(agentSrc, f)))
@@ -291,7 +291,10 @@ for (const f of AGENT_FILES) cpSync(join(agentSrc, f), join(outDir, 'assets', ag
   const idxOut = join(outDir, 'index.html')
   const page = readFileSync(idxOut, 'utf8')
   if (!page.includes('</head>')) fail('index.html 에 </head> 가 없습니다')
-  writeFileSync(idxOut, page.replace('</head>', `  <script type="module" src="${up.base}assets/${agentDirName}/entry.js"></script>\n</head>`))
+  // 검색 결과에 안 뜨게 robots 메타를 넣고, 제목을 한국어로 바꾼다 (upstream 파일은 건드리지 않고 빌드 단계에서 치환)
+  if (!page.includes('<title>rhwp-studio</title>')) fail('index.html 의 <title>rhwp-studio</title> 를 찾지 못했습니다')
+  const withMeta = page.replace('<title>rhwp-studio</title>', '<title>한글 편집기 · Clipboard Share</title>\n  <meta name="robots" content="noindex">')
+  writeFileSync(idxOut, withMeta.replace('</head>', `  <script type="module" src="${up.base}assets/${agentDirName}/entry.js"></script>\n</head>`))
 }
 log(`에이전트 창구: assets/${agentDirName}/ (${AGENT_FILES.length}개 파일)`)
 
@@ -371,6 +374,7 @@ const noCacheBlock = (p) => `${p}\n  Cache-Control: no-cache\n`
 writeFileSync(join(outDir, '_headers'), [
   '/*',
   `  Content-Security-Policy: ${csp}`,
+  '  X-Robots-Tag: noindex',
   '  X-Content-Type-Options: nosniff',
   '  Referrer-Policy: strict-origin-when-cross-origin',
   '',

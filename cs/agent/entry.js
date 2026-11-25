@@ -9,6 +9,10 @@ import { createHwpAgent } from './hwpAgent.js'
 import { installBridge } from './bridge.js'
 import { installEditBridge } from './editBridge.js'
 import { createStudioHost } from './editHost.js'
+import { installDirectNotice } from './directNotice.js'
+
+// 주소창 직접 접속(최상위 창, embed 아님)일 때만 안내 한 줄
+installDirectNotice()
 
 if (window.parent && window.parent !== window) {
   const agent = createHwpAgent(() => window)
